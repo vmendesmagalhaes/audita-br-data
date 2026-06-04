@@ -1,0 +1,48 @@
+# GitHub Actions: gera o índice nacional de contratos do PNCP por fornecedor.
+#
+# ONDE COLOCAR: no repositório PÚBLICO de dados `audita-br-data`, em
+#   .github/workflows/build-pncp-index.yml
+# e copie também o `build_pncp_index.py` para a raiz desse repositório.
+#
+# POR QUE NO REPO PÚBLICO: GitHub Actions é grátis e ILIMITADO em repositório
+# público. Roda em runners da nuvem (IP limpo, sem o throttle que pega o IP
+# do usuário) e publica o índice como release usando o GITHUB_TOKEN
+# automático — nenhum token manual é necessário.
+#
+# RESULTADO: o backend baixa sempre a mesma URL estável
+#   .../releases/download/pncp-index/pncp_fornecedores.sqlite.gz
+name: Índice PNCP de contratos por fornecedor
+
+on:
+  schedule:
+    - cron: "0 4 1 * *"   # dia 1 de cada mês, 04:00 UTC (atualização mensal)
+  workflow_dispatch: {}    # permite rodar manualmente pelo botão "Run workflow"
+
+permissions:
+  contents: write          # necessário para criar/atualizar o release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350    # crawl do feed nacional cabe com folga
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Gerar índice (feed nacional, últimos 365 dias)
+        run: python build_pncp_index.py --dias 365 --out pncp_fornecedores.sqlite
+
+      - name: Comprimir
+        run: gzip -9 pncp_fornecedores.sqlite
+
+      - name: Publicar release (tag estável pncp-index)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete pncp-index --yes --cleanup-tag || true
+          gh release create pncp-index pncp_fornecedores.sqlite.gz \
+            --title "Índice PNCP de contratos por fornecedor" \
+            --notes "Gerado automaticamente em $(date -u '+%Y-%m-%d %H:%M UTC'). Feed nacional do PNCP dos últimos 365 dias, indexado por CNPJ do fornecedor."
