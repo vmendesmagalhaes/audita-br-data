@@ -33,6 +33,7 @@ import argparse
 import glob
 import json
 import os
+import random
 import sqlite3
 import subprocess
 import sys
@@ -48,7 +49,9 @@ def _norm_doc(s: Optional[str]) -> str:
     return "".join(ch for ch in (str(s) if s is not None else "") if ch.isdigit())
 
 
-def _fetch_pagina(url: str, max_retries: int = 4) -> Optional[Dict[str, Any]]:
+def _fetch_pagina(url: str, max_retries: int = 6) -> Optional[Dict[str, Any]]:
+    """Retry com backoff e jitter. O PNCP throttla sob carga; backoff longo
+    espera a janela de limite reabrir."""
     for tentativa in range(max_retries):
         proc = subprocess.run(
             ["curl", "-s", "--max-time", "60", url], capture_output=True
@@ -58,7 +61,7 @@ def _fetch_pagina(url: str, max_retries: int = 4) -> Optional[Dict[str, Any]]:
                 return json.loads(proc.stdout)
             except json.JSONDecodeError:
                 pass  # provável 429/HTML → retry
-        time.sleep(1.5 * (2 ** tentativa))
+        time.sleep(min(2.0 * (2 ** tentativa), 45) + random.uniform(0, 3))
     return None
 
 
@@ -133,10 +136,20 @@ def crawl_janela(ini: str, fim: str, out_path: str) -> None:
     con = sqlite3.connect(out_path)
     _criar_tabela(con)
 
+    # Stagger inicial: desincroniza shards paralelos para não baterem juntos.
+    time.sleep(random.uniform(0, 12))
     print(f"[crawl] janela {ini}..{fim}", flush=True)
-    body1 = _fetch_pagina(_page_url(ini, fim, 1))
+    # Página 1 é crítica (dá o total). Insiste bastante antes de desistir.
+    body1 = None
+    for tentativa in range(10):
+        body1 = _fetch_pagina(_page_url(ini, fim, 1), max_retries=4)
+        if body1:
+            break
+        print(f"        página 1 falhou (tentativa {tentativa+1}/10); aguardando 30s",
+              flush=True)
+        time.sleep(30)
     if not body1:
-        print("ERRO: página 1 falhou.", flush=True)
+        print("ERRO: página 1 falhou após 10 tentativas.", flush=True)
         sys.exit(1)
     total_paginas = int(body1.get("totalPaginas") or 1)
     print(f"        {int(body1.get('totalRegistros') or 0):,} contratos em "
@@ -195,6 +208,11 @@ def _finalizar(con: sqlite3.Connection, dias: int) -> int:
 
 
 def merge(out_path: str, partes: List[str], dias: int) -> None:
+    partes = [p for p in partes if os.path.exists(p) and os.path.getsize(p) > 0]
+    if len(partes) < 40:
+        # 48 shards esperados; abaixo de 40 o índice ficaria incompleto demais.
+        print(f"ERRO: só {len(partes)} pedaços válidos (mínimo 40). Aborta.", flush=True)
+        sys.exit(1)
     if os.path.exists(out_path):
         os.remove(out_path)
     con = sqlite3.connect(out_path)
