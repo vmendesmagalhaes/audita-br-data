@@ -1,49 +1,50 @@
 # GitHub Actions: gera o índice nacional de contratos do PNCP por fornecedor.
 #
-# ONDE COLOCAR: no repositório PÚBLICO de dados `audita-br-data`, em
-#   .github/workflows/build-pncp-index.yml
-# e copie também o `build_pncp_index.py` para a raiz desse repositório.
+# ONDE: repositório PÚBLICO `audita-br-data`, em .github/workflows/.
+# (e copie build_pncp_index.py para a raiz desse repositório)
 #
-# POR QUE NO REPO PÚBLICO: GitHub Actions é grátis e ILIMITADO em repositório
-# público. Roda em runners da nuvem e publica o índice como release usando o
-# GITHUB_TOKEN automático — nenhum token manual é necessário.
+# POR QUE PARALELO E EM JANELAS PEQUENAS: o PNCP throttla qualquer stream
+# sustentado após ~dezenas de páginas. Então o ano é dividido em 120 janelas
+# de ~3 dias (~30-40 páginas cada) — cada shard fica ABAIXO do limite de
+# throttle e termina em segundos. Baixados poucos em paralelo (IPs limpos),
+# um job final une tudo. Grátis e ilimitado em repo público; publica via
+# GITHUB_TOKEN automático (sem token manual).
 #
-# POR QUE EM PARALELO: o PNCP throttla crawlers sustentados (uma sessão única
-# é estrangulada após dezenas de páginas). Então o ano é dividido em 48
-# janelas de data, baixadas em PARALELO — cada runner é um IP limpo e baixa
-# poucas páginas, sem disparar o throttle. Um job final une os pedaços.
-#
-# RESULTADO: o backend baixa sempre a mesma URL estável
-#   .../releases/download/pncp-index/pncp_fornecedores.sqlite.gz
+# RESULTADO: URL estável .../releases/download/pncp-index/pncp_fornecedores.sqlite.gz
 name: Índice PNCP de contratos por fornecedor
 
 on:
   schedule:
-    - cron: "0 4 1 * *"   # dia 1 de cada mês, 04:00 UTC (atualização mensal)
-  workflow_dispatch: {}    # permite rodar manualmente pelo botão "Run workflow"
+    - cron: "0 4 1 * *"   # dia 1 de cada mês, 04:00 UTC
+  workflow_dispatch: {}
 
 permissions:
-  contents: write          # necessário para criar/atualizar o release
+  contents: write
 
 jobs:
-  crawl:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    outputs:
+      shards: ${{ steps.gen.outputs.shards }}
+    steps:
+      - id: gen
+        run: echo "shards=$(python3 -c 'import json;print(json.dumps(list(range(120))))')" >> "$GITHUB_OUTPUT"
+
+  crawl:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
-      max-parallel: 4      # baixo: muitos IPs simultâneos disparam o throttle
+      max-parallel: 6      # poucos IPs simultâneos; janelas pequenas e rápidas
       fail-fast: false
       matrix:
-        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,
-                24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]
+        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Baixar shard ${{ matrix.shard }} (janela de ~7,6 dias)
+      - name: Baixar shard ${{ matrix.shard }}/120 (~3 dias)
         run: |
-          python build_pncp_index.py shard \
-            --shard ${{ matrix.shard }} --shards 48 --dias 365 \
+          python3 build_pncp_index.py shard \
+            --shard ${{ matrix.shard }} --shards 120 --dias 365 \
             --out parte_${{ matrix.shard }}.sqlite
       - uses: actions/upload-artifact@v4
         with:
@@ -53,23 +54,20 @@ jobs:
 
   merge:
     needs: crawl
-    if: ${{ always() }}   # roda mesmo se algum shard falhar (usa o que veio)
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
       - name: Baixar todos os pedaços
         uses: actions/download-artifact@v4
         with:
           pattern: parte-*
           path: partes
           merge-multiple: true
-      - name: Unir num índice final
+      - name: Unir num índice final (exige >= 108 de 120 pedaços)
         run: |
-          python build_pncp_index.py merge \
-            --out pncp_fornecedores.sqlite --dias 365 \
+          python3 build_pncp_index.py merge \
+            --out pncp_fornecedores.sqlite --dias 365 --min 108 \
             partes/parte_*.sqlite
           gzip -9 pncp_fornecedores.sqlite
           ls -lh pncp_fornecedores.sqlite.gz
