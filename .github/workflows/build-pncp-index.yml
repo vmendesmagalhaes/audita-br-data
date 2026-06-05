@@ -5,9 +5,13 @@
 # e copie também o `build_pncp_index.py` para a raiz desse repositório.
 #
 # POR QUE NO REPO PÚBLICO: GitHub Actions é grátis e ILIMITADO em repositório
-# público. Roda em runners da nuvem (IP limpo, sem o throttle que pega o IP
-# do usuário) e publica o índice como release usando o GITHUB_TOKEN
-# automático — nenhum token manual é necessário.
+# público. Roda em runners da nuvem e publica o índice como release usando o
+# GITHUB_TOKEN automático — nenhum token manual é necessário.
+#
+# POR QUE EM PARALELO: o PNCP throttla crawlers sustentados (uma sessão única
+# é estrangulada após dezenas de páginas). Então o ano é dividido em 48
+# janelas de data, baixadas em PARALELO — cada runner é um IP limpo e baixa
+# poucas páginas, sem disparar o throttle. Um job final une os pedaços.
 #
 # RESULTADO: o backend baixa sempre a mesma URL estável
 #   .../releases/download/pncp-index/pncp_fornecedores.sqlite.gz
@@ -22,22 +26,52 @@ permissions:
   contents: write          # necessário para criar/atualizar o release
 
 jobs:
-  build:
+  crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 350    # crawl do feed nacional cabe com folga
+    timeout-minutes: 60
+    strategy:
+      max-parallel: 12     # gentil com o PNCP (não dispara de IPs demais)
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,
+                24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Baixar shard ${{ matrix.shard }} (janela de ~7,6 dias)
+        run: |
+          python build_pncp_index.py shard \
+            --shard ${{ matrix.shard }} --shards 48 --dias 365 \
+            --out parte_${{ matrix.shard }}.sqlite
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parte-${{ matrix.shard }}
+          path: parte_${{ matrix.shard }}.sqlite
+          retention-days: 1
 
-      - name: Gerar índice (feed nacional, últimos 365 dias)
-        run: python build_pncp_index.py --dias 365 --out pncp_fornecedores.sqlite
-
-      - name: Comprimir
-        run: gzip -9 pncp_fornecedores.sqlite
-
+  merge:
+    needs: crawl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Baixar todos os pedaços
+        uses: actions/download-artifact@v4
+        with:
+          pattern: parte-*
+          path: partes
+          merge-multiple: true
+      - name: Unir num índice final
+        run: |
+          python build_pncp_index.py merge \
+            --out pncp_fornecedores.sqlite --dias 365 \
+            partes/parte_*.sqlite
+          gzip -9 pncp_fornecedores.sqlite
+          ls -lh pncp_fornecedores.sqlite.gz
       - name: Publicar release (tag estável pncp-index)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
