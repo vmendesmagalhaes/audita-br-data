@@ -207,11 +207,10 @@ def _finalizar(con: sqlite3.Connection, dias: int) -> int:
     return n
 
 
-def merge(out_path: str, partes: List[str], dias: int) -> None:
+def merge(out_path: str, partes: List[str], dias: int, minimo: int = 1) -> None:
     partes = [p for p in partes if os.path.exists(p) and os.path.getsize(p) > 0]
-    if len(partes) < 40:
-        # 48 shards esperados; abaixo de 40 o índice ficaria incompleto demais.
-        print(f"ERRO: só {len(partes)} pedaços válidos (mínimo 40). Aborta.", flush=True)
+    if len(partes) < minimo:
+        print(f"ERRO: só {len(partes)} pedaços válidos (mínimo {minimo}). Aborta.", flush=True)
         sys.exit(1)
     if os.path.exists(out_path):
         os.remove(out_path)
@@ -255,6 +254,7 @@ def main() -> None:
     p_merge = sub.add_parser("merge", help="Une pedaços num índice final")
     p_merge.add_argument("--out", required=True)
     p_merge.add_argument("--dias", type=int, default=365)
+    p_merge.add_argument("--min", type=int, default=1, dest="minimo")
     p_merge.add_argument("partes", nargs="+")
 
     p_full = sub.add_parser("full", help="Janela inteira de uma vez")
@@ -269,7 +269,7 @@ def main() -> None:
         partes = []
         for pat in args.partes:
             partes.extend(sorted(glob.glob(pat)) if "*" in pat else [pat])
-        merge(args.out, partes, args.dias)
+        merge(args.out, partes, args.dias, minimo=args.minimo)
     elif args.cmd == "full":
         full(args.dias, args.out)
 
