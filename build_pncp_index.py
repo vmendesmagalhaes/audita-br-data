@@ -49,19 +49,21 @@ def _norm_doc(s: Optional[str]) -> str:
     return "".join(ch for ch in (str(s) if s is not None else "") if ch.isdigit())
 
 
-def _fetch_pagina(url: str, max_retries: int = 6) -> Optional[Dict[str, Any]]:
-    """Retry com backoff e jitter. O PNCP throttla sob carga; backoff longo
-    espera a janela de limite reabrir."""
+def _fetch_pagina(url: str, max_retries: int = 3) -> Optional[Dict[str, Any]]:
+    """Retry curto e com TEMPO LIMITADO por página. Best-effort: se a página
+    não responde rápido, o chamador pula (perde aquela página) em vez de
+    travar. Garante que o shard sempre termina em poucos minutos, mesmo sob
+    throttle (pior caso ~3 x 20s = 60s/página)."""
     for tentativa in range(max_retries):
         proc = subprocess.run(
-            ["curl", "-s", "--max-time", "60", url], capture_output=True
+            ["curl", "-s", "--max-time", "20", url], capture_output=True
         )
         if proc.returncode == 0 and proc.stdout:
             try:
                 return json.loads(proc.stdout)
             except json.JSONDecodeError:
                 pass  # provável 429/HTML → retry
-        time.sleep(min(2.0 * (2 ** tentativa), 45) + random.uniform(0, 3))
+        time.sleep((1.0 * (2 ** tentativa)) + random.uniform(0, 1))
     return None
 
 
@@ -127,62 +129,67 @@ def _janela_shard(dias: int, shard: int, shards: int) -> Tuple[str, str]:
     return s_ini.strftime("%Y%m%d"), s_fim.strftime("%Y%m%d")
 
 
+DEADLINE_SHARD_S = 15 * 60   # tempo máximo por shard (trava contra timeout)
+
+
 def crawl_janela(ini: str, fim: str, out_path: str) -> None:
-    """Baixa todos os contratos da janela [ini, fim] para um SQLite parcial.
-    Sequencial e resiliente: páginas que falham são retentadas em rodadas
-    com cooldown — nada é pulado."""
+    """Baixa os contratos da janela [ini, fim] para um SQLite parcial.
+    Best-effort com TEMPO LIMITADO: páginas que não respondem são puladas e,
+    se o shard passar de DEADLINE_SHARD_S, finaliza com o que tem. Garante que
+    o shard sempre termina (sem timeout/cancelamento). O índice resultante é
+    um limite inferior real do nº de órgãos — nunca superestima."""
+    t0 = time.time()
     if os.path.exists(out_path):
         os.remove(out_path)
     con = sqlite3.connect(out_path)
     _criar_tabela(con)
 
-    # Stagger inicial: desincroniza shards paralelos para não baterem juntos.
-    time.sleep(random.uniform(0, 12))
+    time.sleep(random.uniform(0, 8))  # stagger leve entre shards paralelos
     print(f"[crawl] janela {ini}..{fim}", flush=True)
-    # Página 1 é crítica (dá o total). Insiste bastante antes de desistir.
-    body1 = None
-    for tentativa in range(10):
-        body1 = _fetch_pagina(_page_url(ini, fim, 1), max_retries=4)
-        if body1:
-            break
-        print(f"        página 1 falhou (tentativa {tentativa+1}/10); aguardando 30s",
-              flush=True)
-        time.sleep(30)
+    body1 = _fetch_pagina(_page_url(ini, fim, 1), max_retries=5)
     if not body1:
-        print("ERRO: página 1 falhou após 10 tentativas.", flush=True)
+        print("ERRO: página 1 falhou.", flush=True)
         sys.exit(1)
     total_paginas = int(body1.get("totalPaginas") or 1)
     print(f"        {int(body1.get('totalRegistros') or 0):,} contratos em "
           f"{total_paginas} páginas", flush=True)
 
-    restantes = list(range(1, total_paginas + 1))
     total_rows = 0
-    rodada = 0
-    while restantes:
-        rodada += 1
-        falhas: List[int] = []
-        for p in restantes:
-            body = body1 if p == 1 else _fetch_pagina(_page_url(ini, fim, p))
-            if body is None:
-                falhas.append(p)
-                time.sleep(2.0)
-                continue
-            rows = _rows_da_pagina(body)
-            con.executemany(
-                "INSERT INTO contratos VALUES (?,?,?,?,?,?,?,?,?)", rows
-            )
-            total_rows += len(rows)
-        con.commit()
-        if falhas:
-            print(f"        rodada {rodada}: {len(falhas)} falhas; cooldown 30s",
-                  flush=True)
-            time.sleep(30)
-        restantes = falhas
-        if rodada > 15:
-            print(f"        desistindo de {len(restantes)} páginas", flush=True)
+
+    def inserir(body):
+        nonlocal total_rows
+        rows = _rows_da_pagina(body)
+        con.executemany("INSERT INTO contratos VALUES (?,?,?,?,?,?,?,?,?)", rows)
+        total_rows += len(rows)
+
+    inserir(body1)
+    puladas: List[int] = []
+    for p in range(2, total_paginas + 1):
+        if time.time() - t0 > DEADLINE_SHARD_S:
+            puladas.extend(range(p, total_paginas + 1))
             break
+        body = _fetch_pagina(_page_url(ini, fim, p))
+        if body is None:
+            puladas.append(p)
+        else:
+            inserir(body)
+    # 2ª chance para as puladas, enquanto houver tempo
+    ainda = []
+    for p in puladas:
+        if time.time() - t0 > DEADLINE_SHARD_S:
+            ainda.append(p)
+            continue
+        body = _fetch_pagina(_page_url(ini, fim, p))
+        if body is None:
+            ainda.append(p)
+        else:
+            inserir(body)
+    con.commit()
     con.close()
-    print(f"[crawl] pronto: {out_path} ({total_rows:,} contratos)", flush=True)
+    msg = f"[crawl] pronto: {out_path} ({total_rows:,} contratos"
+    if ainda:
+        msg += f", {len(ainda)}/{total_paginas} páginas puladas (throttle)"
+    print(msg + ")", flush=True)
 
 
 def _finalizar(con: sqlite3.Connection, dias: int) -> int:
