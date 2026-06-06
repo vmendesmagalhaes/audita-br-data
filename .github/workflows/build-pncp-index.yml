@@ -28,12 +28,12 @@ jobs:
       shards: ${{ steps.gen.outputs.shards }}
     steps:
       - id: gen
-        run: echo "shards=$(python3 -c 'import json;print(json.dumps(list(range(120))))')" >> "$GITHUB_OUTPUT"
+        run: echo "shards=$(python3 -c 'import json;print(json.dumps(list(range(240))))')" >> "$GITHUB_OUTPUT"
 
   crawl:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20    # janelas de ~18 páginas fecham em ~2-3 min
     strategy:
       max-parallel: 6      # poucos IPs simultâneos; janelas pequenas e rápidas
       fail-fast: false
@@ -41,10 +41,10 @@ jobs:
         shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
     steps:
       - uses: actions/checkout@v4
-      - name: Baixar shard ${{ matrix.shard }}/120 (~3 dias)
+      - name: Baixar shard ${{ matrix.shard }}/240 (~1,5 dia)
         run: |
           python3 build_pncp_index.py shard \
-            --shard ${{ matrix.shard }} --shards 120 --dias 365 \
+            --shard ${{ matrix.shard }} --shards 240 --dias 365 \
             --out parte_${{ matrix.shard }}.sqlite
       - uses: actions/upload-artifact@v4
         with:
@@ -64,10 +64,10 @@ jobs:
           pattern: parte-*
           path: partes
           merge-multiple: true
-      - name: Unir num índice final (exige >= 108 de 120 pedaços)
+      - name: Unir num índice final (exige >= 220 de 240 pedaços)
         run: |
           python3 build_pncp_index.py merge \
-            --out pncp_fornecedores.sqlite --dias 365 --min 108 \
+            --out pncp_fornecedores.sqlite --dias 365 --min 220 \
             partes/parte_*.sqlite
           gzip -9 pncp_fornecedores.sqlite
           ls -lh pncp_fornecedores.sqlite.gz
