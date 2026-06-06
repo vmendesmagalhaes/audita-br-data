@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20    # janelas de ~18 páginas fecham em ~2-3 min
     strategy:
-      max-parallel: 6      # poucos IPs simultâneos; janelas pequenas e rápidas
+      max-parallel: 4      # paralelismo >4 dispara o throttle (página 1 falha)
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
