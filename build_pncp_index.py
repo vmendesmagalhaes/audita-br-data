@@ -148,8 +148,13 @@ def crawl_janela(ini: str, fim: str, out_path: str) -> None:
     print(f"[crawl] janela {ini}..{fim}", flush=True)
     body1 = _fetch_pagina(_page_url(ini, fim, 1), max_retries=5)
     if not body1:
-        print("ERRO: página 1 falhou.", flush=True)
-        sys.exit(1)
+        # Página 1 throttled: NÃO derruba o shard. Sai limpo com tabela vazia
+        # (esta janela fica sem dados; o merge segue e o índice é um limite
+        # inferior — nunca superestima). Evita falha que bloquearia o merge.
+        print("AVISO: página 1 falhou (throttle); shard vazio.", flush=True)
+        con.commit()
+        con.close()
+        return
     total_paginas = int(body1.get("totalPaginas") or 1)
     print(f"        {int(body1.get('totalRegistros') or 0):,} contratos em "
           f"{total_paginas} páginas", flush=True)
@@ -234,6 +239,11 @@ def merge(out_path: str, partes: List[str], dias: int, minimo: int = 1) -> None:
     n = _finalizar(con, dias)
     con.execute("VACUUM")
     con.close()
+    # Sanidade: não publica um índice esparso demais (throttle pesado teria
+    # esvaziado muitos shards). O ano nacional tem ~2 milhões de contratos.
+    if n < 1_200_000:
+        print(f"ERRO: índice esparso demais ({n:,} < 1.2M). Não publica.", flush=True)
+        sys.exit(1)
     mb = os.path.getsize(out_path) / 1e6
     print(f"[merge] pronto: {out_path} ({mb:.1f} MB, {n:,} contratos únicos)", flush=True)
 
