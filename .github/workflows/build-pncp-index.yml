@@ -64,6 +64,18 @@ jobs:
           pattern: parte-*
           path: partes
           merge-multiple: true
+      - name: Acumular com o índice atual (baixa o release vigente)
+        run: |
+          # Pipeline ACUMULATIVO: soma o que já existe com o crawl novo. Como o
+          # throttle do PNCP pula páginas diferentes a cada run, a união cresce
+          # a cada execução até a cobertura ficar completa.
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/pncp-index/pncp_fornecedores.sqlite.gz"
+          if curl -sfL "$URL" -o atual.sqlite.gz; then
+            gunzip atual.sqlite.gz && mv atual.sqlite partes/parte_existente.sqlite
+            echo "índice atual incluído na união."
+          else
+            echo "sem índice anterior (primeira geração)."
+          fi
       - name: Unir num índice final (exige >= 220 de 240 pedaços)
         run: |
           python3 build_pncp_index.py merge \
