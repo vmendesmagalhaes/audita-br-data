@@ -239,10 +239,11 @@ def merge(out_path: str, partes: List[str], dias: int, minimo: int = 1) -> None:
     n = _finalizar(con, dias)
     con.execute("VACUUM")
     con.close()
-    # Sanidade: não publica um índice esparso demais (throttle pesado teria
-    # esvaziado muitos shards). O ano nacional tem ~2 milhões de contratos.
-    if n < 1_200_000:
-        print(f"ERRO: índice esparso demais ({n:,} < 1.2M). Não publica.", flush=True)
+    # Sanidade: não publica um índice esparso demais. O throttle do PNCP
+    # limita a cobertura (~50% das páginas em runs pesados), então o piso é
+    # ~900k (o ano nacional tem ~2,2M; o índice é sempre um LIMITE INFERIOR).
+    if n < 900_000:
+        print(f"ERRO: índice esparso demais ({n:,} < 900k). Não publica.", flush=True)
         sys.exit(1)
     mb = os.path.getsize(out_path) / 1e6
     print(f"[merge] pronto: {out_path} ({mb:.1f} MB, {n:,} contratos únicos)", flush=True)
