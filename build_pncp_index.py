@@ -198,7 +198,11 @@ def crawl_janela(ini: str, fim: str, out_path: str) -> None:
 
 
 def _finalizar(con: sqlite3.Connection, dias: int) -> int:
-    """Dedup por numeroControlePNCP + índice por fornecedor + meta."""
+    """Dedup por numeroControlePNCP + índice por fornecedor + meta.
+
+    Não poda por data: o índice é ACUMULATIVO (a união de várias coletas,
+    cada uma pegando ~50% diferente por causa do throttle). Deduplicar por
+    contrato já mantém cada contrato uma única vez; a cobertura só cresce."""
     con.execute(
         "DELETE FROM contratos WHERE rowid NOT IN "
         "(SELECT MIN(rowid) FROM contratos GROUP BY controle) AND controle <> ''"
